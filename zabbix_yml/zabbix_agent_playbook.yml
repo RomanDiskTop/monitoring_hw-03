@@ -1,0 +1,55 @@
+---
+- name: Установка Zabbix Agent 6.0
+  hosts: zabbix_agent
+  become: true
+  vars_files:
+    - zabbix_pass.yml
+
+  tasks:
+    - name: Установить зависимости
+      apt:
+        name:
+          - wget
+          - gnupg
+        update_cache: yes
+
+    - name: Скачать репозиторий Zabbix
+      get_url:
+        url: "https://repo.zabbix.com/zabbix/{{ zabbix_agent_version }}/debian/pool/main/z/zabbix-release/zabbix-release_latest_{{ zabbix_agent_version }}+debian11_all.deb"
+        dest: /tmp/zabbix-release.deb
+
+    - name: Установить репозиторий Zabbix
+      apt:
+        deb: /tmp/zabbix-release.deb
+
+    - name: Установить Zabbix Agent
+      apt:
+        name: zabbix-agent
+        update_cache: yes
+
+    - name: Указать IP сервера Zabbix (passive checks)
+      lineinfile:
+        path: /etc/zabbix/zabbix_agentd.conf
+        regexp: '^Server='
+        line: "Server={{ zabbix_server_ip }}"
+        backup: yes
+
+    - name: Указать IP сервера Zabbix (active checks)
+      lineinfile:
+        path: /etc/zabbix/zabbix_agentd.conf
+        regexp: '^ServerActive='
+        line: "ServerActive={{ zabbix_server_ip }}"
+        backup: yes
+
+    - name: Указать Hostname агента Zabbix
+      lineinfile:
+        path: /etc/zabbix/zabbix_agentd.conf
+        regexp: '^Hostname='
+        line: "Hostname={{ inventory_hostname }}"
+        backup: yes
+
+    - name: Включить и запустить Zabbix Agent
+      systemd:
+        name: zabbix-agent
+        enabled: yes
+        state: started

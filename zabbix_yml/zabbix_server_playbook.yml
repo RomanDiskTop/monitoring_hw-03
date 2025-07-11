@@ -1,0 +1,131 @@
+---
+- name: Установка Zabbix Server 6.0 LTS (PostgreSQL + Apache)
+  hosts: zabbix_server
+  become: true
+  vars_files:
+    - zabbix_pass.yml
+
+  tasks:
+    - name: Установить зависимости
+      apt:
+        name:
+          - wget
+          - gnupg
+          - postgresql
+          - apache2
+          - php
+          - php7.4-pgsql
+          - php-bcmath
+          - php-mbstring
+          - php-gd
+          - php-xml
+          - php-ldap
+          - php-json
+          - php-zip
+        update_cache: yes
+
+    - name: Скачать пакет репозитория Zabbix
+      get_url:
+        url: https://repo.zabbix.com/zabbix/6.0/debian/pool/main/z/zabbix-release/zabbix-release_latest_6.0+debian11_all.deb
+        dest: /tmp/zabbix-release.deb
+
+    - name: Установить репозиторий Zabbix
+      apt:
+        deb: /tmp/zabbix-release.deb
+        state: present
+
+    - name: Установить Zabbix компоненты
+      apt:
+        name:
+          - zabbix-server-pgsql
+          - zabbix-frontend-php
+          - zabbix-apache-conf 
+          - zabbix-sql-scripts
+          - zabbix-agent
+        update_cache: yes
+      
+    - name: Включить конфигурацию Apache для Zabbix
+      command: a2enconf zabbix
+      args:
+        creates: /etc/apache2/conf-enabled/zabbix.conf
+      notify: Перезапустить Apache
+
+    - name: Перезапустить Zabbix Server
+      systemd:
+        name: zabbix-server
+        state: restarted
+
+    - name: Перезапустить Apache
+      systemd:
+        name: apache2
+        state: restarted
+
+    - name: Найти путь к pg_hba.conf
+      shell: find /etc/postgresql -name pg_hba.conf | head -1
+      register: pg_hba_path
+
+    - name: Настроить доступ к PostgreSQL
+      lineinfile:
+        path: "{{ pg_hba_path.stdout }}"
+        line: "host    {{ db_name }}    {{ db_user }}    127.0.0.1/32    md5"
+        insertafter: '# IPv4 local connections:'
+        backup: yes
+      when: pg_hba_path.stdout != ""
+      notify: Перезагрузить PostgreSQL
+
+# Настройка PostgreSQL
+    - name: Создать пользователя Zabbix
+      command: >
+        sudo -u postgres psql -c "DO $$ 
+        BEGIN
+          IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{{ db_user }}') THEN
+            CREATE USER {{ db_user }} WITH PASSWORD '{{ db_password }}' CREATEDB;
+          END IF;
+        END $$;"
+
+    - name: Создать БД для Zabbix
+      command: >
+        sudo -u postgres bash -c "psql -tc \"SELECT 1 FROM pg_database WHERE datname = '{{ db_name }}'\" | grep -q 1 || psql -c \"CREATE DATABASE {{ db_name }} OWNER {{ db_user }}\""
+
+    - name: Проверить наличие таблицы 'users' в БД
+      command: >
+        sudo -u postgres psql -d {{ db_name }} -tAc
+        "SELECT 1 FROM pg_tables WHERE tablename = 'users';"
+      register: zabbix_schema_check
+      changed_when: false
+      failed_when: false
+
+    - name: Импортировать схему Zabbix (если таблица 'users' не найдена)
+      shell: >
+        zcat /usr/share/zabbix-sql-scripts/postgresql/server.sql.gz | sudo -u postgres psql {{ db_name }}
+      when: zabbix_schema_check.stdout != "1"
+      changed_when: true
+
+    - name: Выдать права на все объекты в схеме public пользователю zabbix
+      shell: |
+        sudo -u postgres psql -d {{ db_name }} -c "GRANT ALL ON ALL TABLES IN SCHEMA public TO {{ db_user }};"
+        sudo -u postgres psql -d {{ db_name }} -c "GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO {{ db_user }};"
+        sudo -u postgres psql -d {{ db_name }} -c "GRANT ALL ON ALL FUNCTIONS IN SCHEMA public TO {{ db_user }};"
+      changed_when: true
+
+    - name: Включить и запустить необходимые службы
+      systemd:
+        name: "{{ item }}"
+        state: started
+        enabled: yes
+      loop:
+        - postgresql
+        - apache2
+        - zabbix-server
+        - zabbix-agent
+
+  handlers:
+    - name: Перезагрузить PostgreSQL
+      systemd:
+        name: postgresql
+        state: reloaded
+
+    - name: Перезапустить Zabbix Server
+      systemd:
+        name: zabbix-server
+        state: restarted
